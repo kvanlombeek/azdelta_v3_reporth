@@ -1,0 +1,14 @@
+.env
+.env.*
+.venv/
+.git/
+.gitignore
+__pycache__/
+*.pyc
+.pytest_cache/
+tests/
+deploy.sh
+README.md
+requirements-dev.txt
+cloudbuild.yaml
+.gcloudignore

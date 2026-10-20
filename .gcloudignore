@@ -1,0 +1,11 @@
+# Wat NIET naar Cloud Build geüpload wordt. Expliciet, zodat .env nooit meegaat.
+.gcloudignore
+.git/
+.gitignore
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
