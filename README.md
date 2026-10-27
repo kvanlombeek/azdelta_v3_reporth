@@ -11,9 +11,10 @@ Na het aanmelden toont de startpagina het weekoverzicht (planning) van de aangem
 | App, `/`, `/health`, security-headers, middleware-volgorde | `app/main.py` |
 | Databaseverbinding (async pool) | `app/db.py` |
 | Weekplanning (queries, groepering per dag en zaal) | `app/planning.py` |
-| HTML (Tailwind via CDN) | `app/pages.py` |
+| JSON-API | `app/api.py`, `app/tarificatie.py` |
+| Frontend (React + Vite) | `frontend/` (build naar `app/web`) |
 
-Endpoints: `/` (aangemeld), `/health` (publiek), `/auth/signin` (loginpagina), `/auth/login`, `/auth/callback`,
+Endpoints: `/api/*` (aangemeld), `/health` (publiek), `/auth/login`, `/auth/callback`,
 `/auth/me` (JSON of 401), `/auth/logout`, `/auth/logged-out`.
 
 ## Lokaal draaien
@@ -149,4 +150,4 @@ done
 - De logs (stdout, dus Cloud Logging) bevatten enkel `login ok` of
   `login geweigerd reden=…` met `tid` en `oid`. Namen, e-mailadressen en tokens worden
   nooit gelogd.
-- Er is geen analytics. Het enige externe script is de Tailwind-CDN.
+- Er is geen analytics. Er zijn geen externe scripts.

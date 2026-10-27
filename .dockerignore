@@ -12,3 +12,5 @@ README.md
 requirements-dev.txt
 cloudbuild.yaml
 .gcloudignore
+frontend/node_modules/
+app/web/

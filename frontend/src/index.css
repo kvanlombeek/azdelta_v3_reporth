@@ -1,0 +1,19 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Huisstijl Reporth: houd gelijk met app/pages.py */
+:root {
+  --color-primary: #003545;
+  --color-accent: #58ffe3;
+  --color-accent-ink: #003545;
+  --color-surface: #f9fafb;
+  --color-text: #111827;
+  --color-text-muted: #6b7280;
+  --color-border: #e5e7eb;
+  --font-body: ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+}
+body {
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}

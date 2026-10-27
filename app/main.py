@@ -1,16 +1,16 @@
 from contextlib import asynccontextmanager
-from datetime import date
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
-from app import db, pages, planning
-from app.auth import LoginRequiredMiddleware, log, router as auth_router
-from app.config import ORTHO_GROUP, settings
+from app import api, db
+from app.auth import LoginRequiredMiddleware, router as auth_router
+from app.config import settings
 
 SECURITY_HEADERS = {
     "X-Content-Type-Options": "nosniff",
@@ -35,8 +35,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Reporth v3", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
 app.include_router(auth_router)
-# Publiek (zie LoginRequiredMiddleware): de loginpagina gebruikt deze bestanden ook.
-app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
+app.include_router(api.router)
 
 
 @app.get("/health")
@@ -44,42 +43,33 @@ async def health():
     return {"status": "ok"}
 
 
-@app.get("/", response_class=HTMLResponse)
-async def home(request: Request, week: str = "", arts: str = "", dag: str = ""):
-    # De login-middleware garandeert dat er hier een gebruiker in de sessie zit.
-    user = request.session["user"]
-    vandaag = planning.vandaag()
-    try:
-        maandag = planning.maandag_van(date.fromisoformat(week))
-    except ValueError:
-        maandag = planning.maandag_van(vandaag)
+if settings.frontend_url != "/":
+    # Lokaal draait de frontend op een eigen poort (Vite); hier enkel een gemakkelijke doorverwijzing.
+    @app.get("/", include_in_schema=False)
+    async def naar_frontend():
+        return RedirectResponse(settings.frontend_url, status_code=307)
 
-    try:
-        artsen = await planning.artsen(ORTHO_GROUP)
-        # Enkel artsen uit de eigen groep; standaard de aangemelde gebruiker zelf.
-        emails = {a["email"].lower() for a in artsen if a["email"]}
-        arts_email = next((e for e in (arts.lower(), user["email"]) if e in emails), None)
-        overzicht = None
-        if arts_email:
-            rows = await planning.geplande_ingrepen(ORTHO_GROUP, arts_email, maandag)
-            overzicht = planning.weekoverzicht(rows, maandag)
-    except Exception as exc:
-        log.warning("planning niet geladen fout=%s", type(exc).__name__)
-        return HTMLResponse(
-            pages.error_page("Planning niet beschikbaar", "De database is even niet bereikbaar.", button=("/", "Opnieuw proberen")),
-            status_code=503,
-        )
 
-    # Gekozen dag; anders vandaag als die in deze week valt, anders de eerste dag met open ingrepen.
-    if dag.isdigit() and int(dag) < 7:
-        dag_index = int(dag)
-    elif 0 <= (vandaag - maandag).days < 7:
-        dag_index = (vandaag - maandag).days
-    else:
-        dagen = overzicht["dagen"] if overzicht else []
-        dag_index = next((i for i, d in enumerate(dagen) if d["aantal_open"]), 0)
+class FrontendFiles(StaticFiles):
+    """De gebouwde React-app. Onbekende paden (bv. /tarificatie/...) krijgen index.html; de router doet de rest."""
 
-    return pages.landing_page(user["name"], artsen, arts_email, maandag, vandaag, overzicht, dag_index)
+    async def get_response(self, path: str, scope):
+        try:
+            response = await super().get_response(path, scope)
+        except HTTPException as exc:
+            if exc.status_code != 404 or path.startswith(("api/", "auth/")):
+                raise
+            response = await super().get_response("index.html", scope)
+        if response.headers.get("content-type", "").startswith("text/html"):
+            response.headers["Cache-Control"] = "no-cache"  # assets zijn gehasht, index.html niet
+        return response
+
+
+# Productie: de Dockerfile bouwt de frontend naar app/web. Lokaal draait Vite apart en bestaat die map niet.
+# Als laatste, zodat /api, /auth en /health voorrang hebben.
+WEB_DIR = Path(__file__).parent / "web"
+if WEB_DIR.is_dir():
+    app.mount("/", FrontendFiles(directory=WEB_DIR, html=True), name="frontend")
 
 
 # Middleware-volgorde: in Starlette draait de LAATST toegevoegde middleware EERST

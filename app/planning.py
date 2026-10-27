@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from psycopg.rows import dict_row
 
 from app import db
+from app.tarificatie import PLANNING_HASH_SQL
 
 TZ = ZoneInfo("Europe/Brussels")
 
@@ -26,8 +27,10 @@ ORDER BY naam
 # Een geplande ingreep telt als gerapporteerd (getarificeerd) als er voor die patiënt
 # een ingreep bestaat tot 1 dag voor of na de geplande datum.
 # De datumfilter vergelijkt de ISO-tekst, zodat de index idx_patient_date_procedure bruikbaar is.
-WEEK_SQL = """
+WEEK_SQL = f"""
 SELECT
+    p.patient_id,
+    {PLANNING_HASH_SQL} AS planning_hash,
     p.geslacht,
     p.date_of_birth::date AS geboortedatum,
     (p.geplande_procedure->>'date_procedure')::date AS datum,
@@ -91,8 +94,22 @@ def _toon_tijd(starttijd: str | None) -> str:
     return f"{t[0]}:{t[1]:02d}" if t else "–"
 
 
+def _ingreep_json(r: dict) -> dict:
+    return {
+        "tijd": _toon_tijd(r["starttijd"]),
+        "beschrijving": r["beschrijving"],
+        "geslacht": r["geslacht"],
+        "geboortedatum": r["geboortedatum"].isoformat() if r["geboortedatum"] else None,
+        "patient_id": r["patient_id"],
+        "planning_hash": r["planning_hash"],
+    }
+
+
 def weekoverzicht(rows: list[dict], maandag: date) -> dict:
-    """Telt de week en groepeert de openstaande ingrepen per dag en per zaal (op starttijd)."""
+    """Telt de week en groepeert de openstaande ingrepen per dag en per zaal (op starttijd).
+
+    Geeft meteen de JSON-vorm terug (datums als ISO-tekst) voor /api/planning.
+    """
     dagen = []
     for i in range(7):
         datum = maandag + timedelta(days=i)
@@ -101,11 +118,21 @@ def weekoverzicht(rows: list[dict], maandag: date) -> dict:
             (r for r in rows if r["datum"] == datum and not r["gerapporteerd"]),
             key=lambda r: (r["zaal"] or "", tijd(r["starttijd"]) or (99, 0)),
         )
-        open_ = [{**r, "tijd": _toon_tijd(r["starttijd"])} for r in open_]
-        zalen = [(zaal, list(items)) for zaal, items in groupby(open_, key=lambda r: r["zaal"])]
-        dagen.append({"datum": datum, "aantal_open": len(open_), "zalen": zalen})
+        zalen = [
+            {"zaal": zaal, "ingrepen": [_ingreep_json(r) for r in items]}
+            for zaal, items in groupby(open_, key=lambda r: r["zaal"])
+        ]
+        dagen.append({"datum": datum.isoformat(), "aantal_open": len(open_), "zalen": zalen})
     return {
         "totaal": len(rows),
         "gerapporteerd": sum(1 for r in rows if r["gerapporteerd"]),
         "dagen": dagen,
     }
+
+
+def standaard_dag(vandaag: date, maandag: date, overzicht: dict | None) -> int:
+    """Vandaag als die in de week valt, anders de eerste dag met open ingrepen."""
+    if 0 <= (vandaag - maandag).days < 7:
+        return (vandaag - maandag).days
+    dagen = overzicht["dagen"] if overzicht else []
+    return next((i for i, d in enumerate(dagen) if d["aantal_open"]), 0)

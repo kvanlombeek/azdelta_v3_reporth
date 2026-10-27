@@ -1,4 +1,5 @@
 import pytest
+from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from fastapi.testclient import TestClient
 from joserfc.errors import InvalidClaimError
@@ -39,39 +40,29 @@ def test_health_is_public(client):
     assert r.headers["X-Frame-Options"] == "DENY"
 
 
-def test_static_is_public(client):
-    r = client.get("/static/logo.svg")
-    assert r.status_code == 200
-    assert r.headers["content-type"].startswith("image/svg+xml")
-    assert client.get("/static/bestaat-niet.png").status_code == 404
-
-
-def test_root_without_session_redirects_to_login(client):
-    r = client.get("/")
-    assert r.status_code == 307
-    assert r.headers["location"] == "/auth/signin"
-    assert r.headers["X-Content-Type-Options"] == "nosniff"
-
-
-def test_signin_page(client, monkeypatch):
-    r = client.get("/auth/signin")
-    assert r.status_code == 200
-    assert 'href="/auth/login"' in r.text
-    assert 'href="/auth/login?via=reporth"' in r.text
-
-    fake_token(monkeypatch, user())
-    client.get("/auth/callback?code=x&state=y")
-    assert client.get("/auth/signin").headers["location"] == "/"
-
-
 def test_me_without_session_is_401(client):
     assert client.get("/auth/me").status_code == 401
 
 
-def test_json_request_without_session_is_401(client):
-    r = client.get("/", headers={"Accept": "application/json"})
+def test_api_without_session_is_401(client):
+    r = client.get("/api/iets")
     assert r.status_code == 401
-    assert client.get("/api/iets").status_code == 401
+    assert r.headers["X-Content-Type-Options"] == "nosniff"
+    assert client.get("/api/planning").status_code == 401
+
+
+def test_frontend_fallback(tmp_path):
+    from app.main import FrontendFiles
+
+    (tmp_path / "index.html").write_text("<div id=root></div>")
+    (tmp_path / "app.js").write_text("x")
+    spa = FastAPI()
+    spa.mount("/", FrontendFiles(directory=tmp_path, html=True))
+    c = TestClient(spa)
+    assert c.get("/tarificatie/nieuw/P1/abc").text == "<div id=root></div>"  # onbekend pad -> index.html
+    assert c.get("/").headers["cache-control"] == "no-cache"
+    assert c.get("/app.js").text == "x"
+    assert c.get("/api/bestaat-niet").status_code == 404  # nooit index.html voor API-paden
 
 
 def test_issuer_validation():
@@ -91,15 +82,14 @@ def test_successful_login_sets_session(client, monkeypatch):
     me = client.get("/auth/me").json()
     assert me == {"name": "Dr. Test", "email": "dr.test@azdelta.be", "oid": "oid-123", "tid": AZ_DELTA}
 
-    home = client.get("/")
-    assert not home.is_redirect  # aangemeld; zonder testdatabase geeft de planning 503
+    assert client.get("/api/planning").status_code == 503  # aangemeld; zonder testdatabase geeft de planning 503
 
 
-def test_email_not_on_allowlist_is_403(client, monkeypatch):
+def test_email_not_on_allowlist_is_refused(client, monkeypatch):
     monkeypatch.setattr(settings, "allowed_emails", frozenset({"iemand.anders@azdelta.be"}))
     fake_token(monkeypatch, user())
     r = client.get("/auth/callback?code=x&state=y")
-    assert r.status_code == 403
+    assert r.headers["location"] == "/fout?reden=lijst"
     assert client.get("/auth/me").status_code == 401
 
 
@@ -111,21 +101,26 @@ def test_email_falls_back_to_preferred_username(client, monkeypatch):
     assert client.get("/auth/callback?code=x&state=y").status_code == 303
 
 
-def test_tenant_rejected_by_issuer_validation_is_403(client, monkeypatch):
+def test_tenant_rejected_by_issuer_validation_is_refused(client, monkeypatch):
     fake_token(monkeypatch, exc=InvalidClaimError("iss"))
-    assert client.get("/auth/callback?code=x&state=y").status_code == 403
+    assert client.get("/auth/callback?code=x&state=y").headers["location"] == "/fout?reden=organisatie"
+    assert client.get("/auth/me").status_code == 401
 
 
-def test_tenant_recheck_after_login_is_403(client, monkeypatch):
+def test_tenant_recheck_after_login_is_refused(client, monkeypatch):
     fake_token(monkeypatch, user(tid=OTHER))
-    assert client.get("/auth/callback?code=x&state=y").status_code == 403
+    assert client.get("/auth/callback?code=x&state=y").headers["location"] == "/fout?reden=organisatie"
+    assert client.get("/auth/me").status_code == 401
 
 
-def test_entra_error_is_shown_escaped(client):
-    r = client.get("/auth/callback", params={"error": "access_denied", "error_description": "AADSTS50105 <script>"})
-    assert r.status_code == 400
-    assert "AADSTS50105 &lt;script&gt;" in r.text
-    assert "<script>" not in r.text.rsplit("</script>", 1)[1]  # enkel de Tailwind-scripts in <head>
+def test_entra_error_redirects_with_code_only(client):
+    r = client.get("/auth/callback", params={"error": "access_denied", "error_description": "AADSTS50105 geheim"})
+    assert r.status_code == 303
+    assert r.headers["location"] == "/fout?reden=microsoft&code=access_denied"  # geen beschrijving doorgeven
+
+
+def test_logged_out_redirects_to_frontend(client):
+    assert client.get("/auth/logged-out").headers["location"] == "/afgemeld"
 
 
 def test_guest_login_uses_reporth_tenant(client, monkeypatch):
@@ -152,4 +147,24 @@ def test_logout_clears_session_and_redirects_to_microsoft(client, monkeypatch):
     assert r.headers["location"].startswith(
         "https://login.microsoftonline.com/organizations/oauth2/v2.0/logout?post_logout_redirect_uri=http%3A%2F%2Ftestserver%2Fauth%2Flogged-out"
     )
-    assert client.get("/").status_code == 307
+    assert client.get("/api/planning").status_code == 401
+
+
+def test_dev_login_uit_standaard(client):
+    assert client.get("/auth/dev").status_code == 404
+
+
+def test_dev_login_aan(client, monkeypatch):
+    monkeypatch.setattr(settings, "dev_login_email", "dev@example.com")
+    r = client.get("/auth/dev")
+    assert r.status_code == 303 and r.headers["location"] == "/"
+    assert client.get("/auth/me").json()["email"] == "dev@example.com"
+
+
+def test_dev_login_geweigerd_op_cloud_run(monkeypatch):
+    from app.config import load_settings
+
+    monkeypatch.setenv("DEV_LOGIN_EMAIL", "dev@example.com")
+    monkeypatch.setenv("K_SERVICE", "reporth-v3")
+    with pytest.raises(SystemExit):
+        load_settings()

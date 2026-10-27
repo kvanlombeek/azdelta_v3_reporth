@@ -10,3 +10,4 @@ python-dotenv==1.2.4
 psycopg[binary]==3.3.6
 psycopg-pool==3.3.3
 tzdata==2026.5
+google-genai==2.33.0

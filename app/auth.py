@@ -6,11 +6,10 @@ from urllib.parse import urlencode
 
 from authlib.integrations.starlette_client import OAuth, OAuthError
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from joserfc.errors import InvalidClaimError, JoseError
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from app import pages
 from app.config import settings
 
 # Naar stdout, zodat het in Cloud Logging terechtkomt.
@@ -69,15 +68,14 @@ def _client(request: Request):
 router = APIRouter(prefix="/auth")
 
 
-def _forbidden(message: str) -> HTMLResponse:
-    return HTMLResponse(pages.error_page("Geen toegang", message), status_code=403)
+def _naar_frontend(pad: str = "/") -> RedirectResponse:
+    """Doorsturen naar een pagina van de React-app (FRONTEND_URL is lokaal een andere poort)."""
+    return RedirectResponse(settings.frontend_url.rstrip("/") + pad, status_code=303)
 
 
-@router.get("/signin")
-async def signin(request: Request):
-    if request.session.get("user"):
-        return RedirectResponse("/", status_code=303)
-    return HTMLResponse(pages.login_page())
+def _fout(reden: str, **extra: str) -> RedirectResponse:
+    """De foutpagina zelf is React: /fout?reden=... Enkel codes, geen details van Microsoft of de gebruiker."""
+    return _naar_frontend("/fout?" + urlencode({"reden": reden, **extra}))
 
 
 @router.get("/login")
@@ -93,25 +91,21 @@ async def callback(request: Request):
     # Fout die Microsoft zelf terugstuurt (bv. AADSTS-codes).
     if "error" in request.query_params:
         error = request.query_params.get("error", "")
-        description = request.query_params.get("error_description", "")
         log.warning("login geweigerd reden=entra_error error=%s", error)
-        return HTMLResponse(
-            pages.error_page("Aanmelden mislukt", "Microsoft meldt een fout.", f"{error}\n{description}"),
-            status_code=400,
-        )
+        return _fout("microsoft", code=error)
 
     try:
         token = await _client(request).authorize_access_token(request, claims_options=CLAIMS_OPTIONS)
     except InvalidClaimError as exc:
         if exc.claim == "iss":
             log.warning("login geweigerd reden=tenant_of_issuer_niet_toegelaten")
-            return _forbidden("Je organisatie heeft (nog) geen toegang tot Reporth.")
+            return _fout("organisatie")
         log.warning("login geweigerd reden=ongeldig_token claim=%s", exc.claim)
-        return HTMLResponse(pages.error_page("Aanmelden mislukt", "Ongeldig token.", str(exc)), status_code=400)
+        return _fout("token")
     # Authlib 1.9 valideert het id_token met joserfc; die fouten zijn joserfc.errors.JoseError.
     except (OAuthError, JoseError) as exc:
         log.warning("login geweigerd reden=%s", type(exc).__name__)
-        return HTMLResponse(pages.error_page("Aanmelden mislukt", "De login kon niet worden voltooid.", str(exc)), status_code=400)
+        return _fout("login")
 
     userinfo = token.get("userinfo") or {}
     tid = (userinfo.get("tid") or "").lower()
@@ -120,18 +114,32 @@ async def callback(request: Request):
     # Defense in depth: de tenant nog eens expliciet controleren.
     if tid not in settings.allowed_tenants:
         log.warning("login geweigerd reden=tenant_niet_toegelaten tid=%s oid=%s", tid, oid)
-        return _forbidden("Je organisatie heeft (nog) geen toegang tot Reporth.")
+        return _fout("organisatie")
 
     email = (userinfo.get("email") or userinfo.get("preferred_username") or "").lower()
     if settings.allowed_emails and email not in settings.allowed_emails:
         log.warning("login geweigerd reden=email_niet_op_lijst tid=%s oid=%s", tid, oid)
-        return _forbidden("Je account staat niet op de lijst van toegelaten gebruikers.")
+        return _fout("lijst")
 
     # Nieuwe sessie (voorkomt session fixation); enkel deze vier velden, geen tokens.
     request.session.clear()
     request.session["user"] = {"name": userinfo.get("name") or email, "email": email, "oid": oid, "tid": tid}
     log.info("login ok tid=%s oid=%s", tid, oid)
-    return RedirectResponse("/", status_code=303)
+    return _naar_frontend()
+
+
+@router.get("/dev")
+async def dev_login(request: Request):
+    """Lokale ontwikkel-login zonder Microsoft (bv. als MFA niet beschikbaar is).
+
+    Bestaat enkel als DEV_LOGIN_EMAIL gezet is; config.py weigert die instelling op Cloud Run.
+    """
+    if not settings.dev_login_email:
+        return JSONResponse({"detail": "Not Found"}, status_code=404)
+    request.session.clear()
+    request.session["user"] = {"name": "Developer", "email": settings.dev_login_email, "oid": "dev-oid", "tid": "dev-tenant"}
+    log.warning("dev-login actief")
+    return _naar_frontend()
 
 
 @router.get("/me")
@@ -153,16 +161,17 @@ async def logout(request: Request):
 
 @router.get("/logged-out")
 async def logged_out():
-    return HTMLResponse(pages.logged_out_page())
+    return _naar_frontend("/afgemeld")
 
 
 class LoginRequiredMiddleware(BaseHTTPMiddleware):
-    """Schermt alles af behalve /auth/*, /static/* en /health."""
+    """Schermt de data af: /api/* geeft 401 zonder sessie.
+
+    De bestanden van de React-app zijn publiek (er zit geen data in); die stuurt zelf
+    door naar /aanmelden als een API-call 401 geeft.
+    """
 
     async def dispatch(self, request: Request, call_next):
-        path = request.url.path
-        if path == "/health" or path.startswith(("/auth/", "/static/")) or request.session.get("user"):
-            return await call_next(request)
-        if path.startswith("/api/") or "application/json" in request.headers.get("accept", ""):
+        if request.url.path.startswith("/api/") and not request.session.get("user"):
             return JSONResponse({"detail": "Niet aangemeld"}, status_code=401)
-        return RedirectResponse("/auth/signin", status_code=307)
+        return await call_next(request)

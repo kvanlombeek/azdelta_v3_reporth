@@ -3,3 +3,10 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Frontend
+frontend/node_modules/
+app/web/
+
+# Retool stuff
+2026-10-27_Reporth_versie_Retool.zip
